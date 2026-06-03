@@ -32,7 +32,7 @@ ca - Caddy 简易反向代理管理工具
 
 用法：
   ca install                         安装/启用 Caddy，并安装 Cloudflare DNS 插件
-  ca bootstrap [--token TOKEN]        一条龙安装：保存 token、写默认规则并应用
+  ca bootstrap [--token TOKEN]        一条龙安装：保存 token、校验并应用当前规则
   ca token set [TOKEN]                安全保存 Cloudflare API token
   ca token check                      检查 token 文件是否存在
   ca apply                           生成 Caddyfile、校验并重载 Caddy
@@ -673,7 +673,7 @@ interactive_bootstrap() {
   need_root
   echo
   echo "一条龙安装会安装 Caddy、安装 Cloudflare DNS 插件，"
-  echo "创建默认规则、校验配置，并重载 Caddy。"
+  echo "确认基础目录、校验当前规则，并重载 Caddy。"
   echo
   if confirm "继续执行一条龙安装吗？"; then
     install_caddy
