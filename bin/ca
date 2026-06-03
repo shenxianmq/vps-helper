@@ -125,20 +125,9 @@ ui_section() {
 }
 
 ui_menu_row() {
-  local left_no="$1"
-  local left_label="$2"
-  local right_no="${3:-}"
-  local right_label="${4:-}"
-  local left_text right_text
-  left_text="$(printf '%2s. %s' "$left_no" "$left_label")"
-  if [[ -n "$right_no" ]]; then
-    right_text="$(printf '%2s. %s' "$right_no" "$right_label")"
-    printf '%s%s%s  %s%s%s\n' \
-      "$C_CYAN" "${left_text%%.*}." "$C_RESET$(pad_display " ${left_label}" 34)" \
-      "$C_CYAN" "${right_text%%.*}." "$C_RESET ${right_label}"
-  else
-    printf '%s%2s.%s %s\n' "$C_CYAN" "$left_no" "$C_RESET" "$left_label"
-  fi
+  local no="$1"
+  local label="$2"
+  printf '  %s%2s.%s %s\n' "$C_CYAN" "$no" "$C_RESET" "$label"
 }
 
 ui_prompt() {
@@ -1103,16 +1092,22 @@ interactive_menu() {
     print_rules_compact
 
     ui_section "初始化与配置"
-    ui_menu_row 1 "一条龙安装/初始化  *" 2 "设置 Cloudflare token"
-    ui_menu_row 3 "应用配置并重载 Caddy" 4 "检查/更新 ca 自身"
+    ui_menu_row 1 "一条龙安装/初始化  *"
+    ui_menu_row 2 "设置 Cloudflare token"
+    ui_menu_row 3 "应用配置并重载 Caddy"
+    ui_menu_row 4 "检查/更新 ca 自身"
 
     ui_section "反向代理规则"
-    ui_menu_row 5 "添加反向代理规则  >" 6 "删除规则"
-    ui_menu_row 7 "列出规则文件" 8 "查看规则与生成预览  >"
+    ui_menu_row 5 "添加反向代理规则  >"
+    ui_menu_row 6 "删除规则"
+    ui_menu_row 7 "列出规则文件"
+    ui_menu_row 8 "查看规则与生成预览  >"
 
     ui_section "验证与真实配置"
-    ui_menu_row 9 "测试域名访问" 10 "查看服务状态"
-    ui_menu_row 11 "一键查看真实 Caddyfile  *" 12 "查看 Caddy 日志"
+    ui_menu_row 9 "测试域名访问"
+    ui_menu_row 10 "查看服务状态"
+    ui_menu_row 11 "一键查看真实 Caddyfile  *"
+    ui_menu_row 12 "查看 Caddy 日志"
 
     echo
     ui_border "="
