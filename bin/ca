@@ -119,7 +119,6 @@ ui_title() {
 
 ui_section() {
   local title="$1"
-  echo
   printf '%s%s%s\n' "$C_CYAN" "$(ui_repeat '-')" "$C_RESET"
   printf '%s%s%s\n' "$C_BOLD" "$title" "$C_RESET"
 }
@@ -1104,7 +1103,6 @@ interactive_menu() {
     ui_menu_row 11 "一键查看真实 Caddyfile  *"
     ui_menu_row 12 "查看 Caddy 日志"
 
-    echo
     ui_border "="
     ui_menu_row 0 "退出"
     ui_border "="
