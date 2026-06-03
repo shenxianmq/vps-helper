@@ -47,8 +47,8 @@ sudo ca
 ```bash
 sudo ca bootstrap
 sudo ca token set
-sudo ca add-wildcard example.com http://127.0.0.1:8080
-sudo ca add-fixed app.example.com 127.0.0.1:8080
+sudo ca add-wildcard DOMAIN UPSTREAM
+sudo ca add-fixed DOMAIN UPSTREAM
 sudo ca apply
 sudo ca test
 sudo ca status

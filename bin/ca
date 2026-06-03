@@ -10,12 +10,6 @@ CF_ENV_FILE="/etc/caddy/secrets/cloudflare.env"
 SYSTEMD_DROPIN_DIR="/etc/systemd/system/caddy.service.d"
 SYSTEMD_DROPIN="$SYSTEMD_DROPIN_DIR/10-cloudflare-env.conf"
 
-DEFAULT_EMAIL="admin@example.com"
-DEFAULT_WILDCARD_DOMAIN="example.com"
-DEFAULT_WILDCARD_UPSTREAM="http://127.0.0.1:8080"
-DEFAULT_FIXED_DOMAIN="app.example.com"
-DEFAULT_FIXED_UPSTREAM="127.0.0.1:8080"
-
 die() {
   echo "错误：$*" >&2
   exit 1
@@ -52,14 +46,14 @@ ca - Caddy 简易反向代理管理工具
 
 示例：
   ca bootstrap --token 'cloudflare_token_here'
-  ca add-wildcard example.com http://127.0.0.1:8080
-  ca add-fixed app.example.com 127.0.0.1:8080
+  ca add-wildcard DOMAIN UPSTREAM
+  ca add-fixed DOMAIN UPSTREAM
   ca apply
 EOF
 }
 
 load_config() {
-  EMAIL="$DEFAULT_EMAIL"
+  EMAIL=""
   mkdir -p "$CONFIG_DIR" "$RULES_DIR"
   if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -71,11 +65,25 @@ ensure_default_config() {
   mkdir -p "$CONFIG_DIR" "$RULES_DIR"
   if [[ ! -f "$CONFIG_FILE" ]]; then
     cat >"$CONFIG_FILE" <<EOF
-EMAIL="$DEFAULT_EMAIL"
+EMAIL=""
 EOF
     chmod 0644 "$CONFIG_FILE"
   fi
 
+}
+
+ensure_email_config() {
+  load_config
+  if [[ -n "$EMAIL" ]]; then
+    return 0
+  fi
+
+  read -rp "请输入 ACME 证书通知邮箱：" EMAIL
+  [[ -n "$EMAIL" ]] || die "邮箱不能为空"
+  cat >"$CONFIG_FILE" <<EOF
+EMAIL="$EMAIL"
+EOF
+  chmod 0644 "$CONFIG_FILE"
 }
 
 sanitize_domain() {
@@ -230,7 +238,7 @@ EOF
 }
 
 generate_caddyfile() {
-  load_config
+  ensure_email_config
   cat <<EOF
 {
 	email $EMAIL
@@ -497,15 +505,15 @@ interactive_add_rule() {
   need_root
   echo
   echo "添加反向代理规则"
-  echo "  1) 泛域名：*.example.com 和 example.com 都转发到同一个上游"
-  echo "  2) 固定域名：app.example.com 转发到一个上游"
+  echo "  1) 泛域名：*.你的域名 和 你的域名 都转发到同一个上游"
+  echo "  2) 固定域名：某个完整域名转发到一个上游"
   echo
   local type domain upstream summary
   read -rp "请选择规则类型 [1/2]：" type
   case "$type" in
     1)
-      domain="$(prompt_default "域名，不要带 *" "$DEFAULT_WILDCARD_DOMAIN")"
-      upstream="$(prompt_default "上游地址" "$DEFAULT_WILDCARD_UPSTREAM")"
+      domain="$(prompt_default "域名，不要带 *")"
+      upstream="$(prompt_default "上游地址")"
       summary="[泛域名] *.$domain, $domain -> $upstream"
       echo
       echo "准备添加：$summary"
@@ -513,8 +521,8 @@ interactive_add_rule() {
       add_wildcard "$domain" "$upstream"
       ;;
     2)
-      domain="$(prompt_default "域名" "$DEFAULT_FIXED_DOMAIN")"
-      upstream="$(prompt_default "上游地址" "$DEFAULT_FIXED_UPSTREAM")"
+      domain="$(prompt_default "域名")"
+      upstream="$(prompt_default "上游地址")"
       summary="[固定域名] $domain -> $upstream"
       echo
       echo "准备添加：$summary"
@@ -574,7 +582,7 @@ interactive_test_domains() {
   echo "  - 直接回车或 all：测试全部规则"
   echo "  - 序号：测试某条规则，例如 1"
   echo "  - 多个序号：测试多条规则，例如 1 2"
-  echo "  - 域名：测试指定域名，例如 app.example.com"
+  echo "  - 域名：测试指定域名"
   echo "  - 多个域名：用空格分隔"
   echo
   local input index token hosts=()
