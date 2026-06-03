@@ -1,0 +1,712 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP_NAME="ca"
+CONFIG_DIR="/etc/ca-manager"
+RULES_DIR="$CONFIG_DIR/rules.d"
+CONFIG_FILE="$CONFIG_DIR/config.env"
+CADDYFILE="/etc/caddy/Caddyfile"
+CF_ENV_FILE="/etc/caddy/secrets/cloudflare.env"
+SYSTEMD_DROPIN_DIR="/etc/systemd/system/caddy.service.d"
+SYSTEMD_DROPIN="$SYSTEMD_DROPIN_DIR/10-cloudflare-env.conf"
+
+DEFAULT_EMAIL="admin@example.com"
+DEFAULT_WILDCARD_DOMAIN="example.com"
+DEFAULT_WILDCARD_UPSTREAM="http://127.0.0.1:8080"
+DEFAULT_FIXED_DOMAIN="app.example.com"
+DEFAULT_FIXED_UPSTREAM="127.0.0.1:8080"
+
+die() {
+  echo "错误：$*" >&2
+  exit 1
+}
+
+need_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    die "请使用 root 运行，例如：sudo ca"
+  fi
+}
+
+log() {
+  printf '[%s] %s\n' "$APP_NAME" "$*"
+}
+
+usage() {
+  cat <<'EOF'
+ca - Caddy 简易反向代理管理工具
+
+用法：
+  ca install                         安装/启用 Caddy，并安装 Cloudflare DNS 插件
+  ca bootstrap [--token TOKEN]        一条龙安装：保存 token、写默认规则并应用
+  ca token set [TOKEN]                安全保存 Cloudflare API token
+  ca token check                      检查 token 文件是否存在
+  ca apply                           生成 Caddyfile、校验并重载 Caddy
+  ca show                            查看规则和当前 Caddyfile
+  ca status                          查看 Caddy 状态、监听端口和模块
+  ca test [host ...]                 测试已配置或指定的域名
+  ca logs [N]                        查看最近的 Caddy 日志，默认 80 行
+  ca add-wildcard DOMAIN UPSTREAM    添加泛域名规则：*.DOMAIN 和 DOMAIN -> UPSTREAM
+  ca add-fixed DOMAIN UPSTREAM       添加固定域名规则：DOMAIN -> UPSTREAM
+  ca remove DOMAIN                   删除指定域名的规则
+  ca list                            列出规则文件
+
+示例：
+  ca bootstrap --token 'cloudflare_token_here'
+  ca add-wildcard example.com http://127.0.0.1:8080
+  ca add-fixed app.example.com 127.0.0.1:8080
+  ca apply
+EOF
+}
+
+load_config() {
+  EMAIL="$DEFAULT_EMAIL"
+  mkdir -p "$CONFIG_DIR" "$RULES_DIR"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+  fi
+}
+
+ensure_default_config() {
+  mkdir -p "$CONFIG_DIR" "$RULES_DIR"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    cat >"$CONFIG_FILE" <<EOF
+EMAIL="$DEFAULT_EMAIL"
+EOF
+    chmod 0644 "$CONFIG_FILE"
+  fi
+
+}
+
+sanitize_domain() {
+  local domain="$1"
+  [[ "$domain" =~ ^[A-Za-z0-9.*_-]+$ ]] || die "域名不合法：$domain"
+  printf '%s' "$domain" | tr '[:upper:]' '[:lower:]'
+}
+
+validate_upstream() {
+  local upstream="$1"
+  [[ "$upstream" =~ ^https?://[^[:space:]]+$ || "$upstream" =~ ^[A-Za-z0-9._:-]+$ ]] || die "上游地址不合法：$upstream"
+}
+
+install_caddy() {
+  need_root
+  log "正在安装 Caddy 官方源和软件包"
+  apt-get update
+  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+
+  if [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]]; then
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+      | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  fi
+
+  if [[ ! -f /etc/apt/sources.list.d/caddy-stable.list ]]; then
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+      | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+  fi
+
+  apt-get update
+  apt-get install -y caddy
+
+  if ! caddy list-modules 2>/dev/null | grep -qx 'dns.providers.cloudflare'; then
+    log "正在给 Caddy 安装 Cloudflare DNS 插件"
+    caddy add-package github.com/caddy-dns/cloudflare --keep-backup
+  else
+    log "Cloudflare DNS 插件已存在"
+  fi
+
+  mkdir -p /etc/caddy/secrets "$SYSTEMD_DROPIN_DIR"
+  chown root:caddy /etc/caddy/secrets 2>/dev/null || chown root:root /etc/caddy/secrets
+  chmod 0750 /etc/caddy/secrets
+
+  cat >"$SYSTEMD_DROPIN" <<EOF
+[Service]
+EnvironmentFile=$CF_ENV_FILE
+EOF
+  systemctl daemon-reload
+  systemctl enable caddy
+  log "安装完成"
+}
+
+save_token() {
+  need_root
+  local token="${1:-}"
+  if [[ -z "$token" ]]; then
+    read -rsp "请输入 Cloudflare API token：" token
+    echo
+  fi
+  [[ -n "$token" ]] || die "token 不能为空"
+
+  mkdir -p /etc/caddy/secrets "$SYSTEMD_DROPIN_DIR"
+  umask 0077
+  cat >"$CF_ENV_FILE" <<EOF
+CLOUDFLARE_API_TOKEN=$token
+EOF
+  chown root:caddy "$CF_ENV_FILE" 2>/dev/null || chown root:root "$CF_ENV_FILE"
+  chmod 0640 "$CF_ENV_FILE"
+
+  cat >"$SYSTEMD_DROPIN" <<EOF
+[Service]
+EnvironmentFile=$CF_ENV_FILE
+EOF
+  systemctl daemon-reload
+  log "token 已保存到 $CF_ENV_FILE"
+}
+
+require_token() {
+  [[ -s "$CF_ENV_FILE" ]] || die "缺少 Cloudflare token，请先运行：ca token set"
+}
+
+source_token_for_caddy() {
+  require_token
+  set -a
+  # shellcheck disable=SC1090
+  source "$CF_ENV_FILE"
+  set +a
+}
+
+add_wildcard() {
+  need_root
+  local domain upstream file
+  domain="$(sanitize_domain "$1")"
+  upstream="$2"
+  validate_upstream "$upstream"
+  mkdir -p "$RULES_DIR"
+  file="$RULES_DIR/$domain.wildcard"
+  cat >"$file" <<EOF
+DOMAIN="$domain"
+UPSTREAM="$upstream"
+INSECURE_SKIP_VERIFY="1"
+EOF
+  log "已添加泛域名规则：*.$domain, $domain -> $upstream"
+}
+
+add_fixed() {
+  need_root
+  local domain upstream file insecure
+  domain="$(sanitize_domain "$1")"
+  upstream="$2"
+  validate_upstream "$upstream"
+  insecure="0"
+  if [[ "$upstream" =~ ^https://127\.0\.0\.1 || "$upstream" =~ ^https://localhost ]]; then
+    insecure="1"
+  fi
+  mkdir -p "$RULES_DIR"
+  file="$RULES_DIR/$domain.fixed"
+  cat >"$file" <<EOF
+DOMAIN="$domain"
+UPSTREAM="$upstream"
+INSECURE_SKIP_VERIFY="$insecure"
+EOF
+  log "已添加固定域名规则：$domain -> $upstream"
+}
+
+remove_rule() {
+  need_root
+  local domain
+  domain="$(sanitize_domain "$1")"
+  rm -f "$RULES_DIR/$domain.wildcard" "$RULES_DIR/$domain.fixed"
+  log "已删除 $domain 对应的规则文件"
+}
+
+emit_reverse_proxy() {
+  local upstream="$1"
+  local insecure="${2:-0}"
+
+  cat <<EOF
+	reverse_proxy $upstream {
+		header_up Host {host}
+EOF
+  if [[ "$upstream" =~ ^https:// && "$insecure" == "1" ]]; then
+    cat <<'EOF'
+		transport http {
+			tls_insecure_skip_verify
+		}
+EOF
+  fi
+  cat <<'EOF'
+	}
+EOF
+}
+
+generate_caddyfile() {
+  load_config
+  cat <<EOF
+{
+	email $EMAIL
+}
+
+EOF
+
+  local file domain upstream insecure
+  shopt -s nullglob
+  for file in "$RULES_DIR"/*.wildcard; do
+    DOMAIN="" UPSTREAM="" INSECURE_SKIP_VERIFY="1"
+    # shellcheck disable=SC1090
+    source "$file"
+    domain="$(sanitize_domain "$DOMAIN")"
+    upstream="$UPSTREAM"
+    insecure="$INSECURE_SKIP_VERIFY"
+    validate_upstream "$upstream"
+    cat <<EOF
+*.$domain, $domain {
+	tls {
+		dns cloudflare {\$CLOUDFLARE_API_TOKEN}
+	}
+
+EOF
+    emit_reverse_proxy "$upstream" "$insecure"
+    printf '}\n\n'
+  done
+
+  for file in "$RULES_DIR"/*.fixed; do
+    DOMAIN="" UPSTREAM="" INSECURE_SKIP_VERIFY="0"
+    # shellcheck disable=SC1090
+    source "$file"
+    domain="$(sanitize_domain "$DOMAIN")"
+    upstream="$UPSTREAM"
+    insecure="$INSECURE_SKIP_VERIFY"
+    validate_upstream "$upstream"
+    cat <<EOF
+$domain {
+EOF
+    emit_reverse_proxy "$upstream" "$insecure"
+    printf '}\n\n'
+  done
+
+  cat <<'EOF'
+http:// {
+	abort
+}
+EOF
+}
+
+apply_config() {
+  need_root
+  ensure_default_config
+  source_token_for_caddy
+  local backup tmp
+  tmp="$(mktemp)"
+  generate_caddyfile >"$tmp"
+
+  caddy fmt --overwrite "$tmp"
+  caddy validate --config "$tmp" --adapter caddyfile
+
+  if [[ -f "$CADDYFILE" ]]; then
+    backup="$CADDYFILE.before-ca.$(date +%Y%m%d%H%M%S)"
+    cp "$CADDYFILE" "$backup"
+    log "已备份当前 Caddyfile：$backup"
+  fi
+
+  install -m 0644 "$tmp" "$CADDYFILE"
+  rm -f "$tmp"
+  systemctl reload caddy || systemctl restart caddy
+  log "Caddy 已重载"
+}
+
+show_rules() {
+  ensure_default_config
+  echo "== 规则文件 =="
+  find "$RULES_DIR" -maxdepth 1 -type f | sort | while read -r file; do
+    echo "-- $file"
+    sed -E 's/(TOKEN|SECRET|KEY|PASSWORD)=.*/\1=***hidden***/' "$file"
+  done
+  echo
+  echo "== 将要生成的 Caddyfile =="
+  generate_caddyfile
+  echo
+  echo "== 当前生效的 Caddyfile =="
+  [[ -f "$CADDYFILE" ]] && nl -ba "$CADDYFILE" || echo "$CADDYFILE 不存在"
+}
+
+status() {
+  echo "== Caddy 信息 =="
+  command -v caddy || true
+  caddy version 2>/dev/null || true
+  echo
+  echo "== 已加载模块 =="
+  caddy list-modules 2>/dev/null | grep -E '^(dns.providers.cloudflare|http.handlers.reverse_proxy)$' || true
+  echo
+  echo "== 服务状态 =="
+  systemctl --no-pager --full status caddy | sed -n '1,18p' || true
+  echo
+  echo "== 监听端口 =="
+  ss -ltnp | grep -E ':(80|443|8080|8443)\b' || true
+}
+
+test_hosts() {
+  ensure_default_config
+  local hosts=("$@")
+  if [[ "${#hosts[@]}" -eq 0 ]]; then
+    hosts=()
+    local file domain
+    shopt -s nullglob
+    for file in "$RULES_DIR"/*.wildcard "$RULES_DIR"/*.fixed; do
+      DOMAIN=""
+      # shellcheck disable=SC1090
+      source "$file"
+      domain="$(sanitize_domain "$DOMAIN")"
+      if [[ "$file" == *.wildcard ]]; then
+        hosts+=("lucky.$domain" "random-check.$domain" "$domain")
+      else
+        hosts+=("$domain")
+      fi
+    done
+  fi
+
+  local host
+  for host in "${hosts[@]}"; do
+    echo "-- https://$host/ --"
+    curl -skI --max-time 12 "https://$host/" | sed -n '1,10p' || true
+    echo
+  done
+}
+
+logs() {
+  local lines="${1:-80}"
+  journalctl -u caddy -n "$lines" --no-pager
+}
+
+pause() {
+  echo
+  read -rp "按回车继续..." _
+}
+
+prompt_default() {
+  local prompt="$1"
+  local default="${2:-}"
+  local value
+  if [[ -n "$default" ]]; then
+    read -rp "$prompt [$default]：" value
+    printf '%s' "${value:-$default}"
+  else
+    read -rp "$prompt：" value
+    printf '%s' "$value"
+  fi
+}
+
+confirm() {
+  local prompt="$1"
+  local answer
+  read -rp "$prompt [y/N]：" answer
+  [[ "$answer" =~ ^[Yy]$|^[Yy][Ee][Ss]$ ]]
+}
+
+RULE_FILES=()
+RULE_TYPES=()
+RULE_DOMAINS=()
+RULE_UPSTREAMS=()
+
+load_rules() {
+  ensure_default_config
+  RULE_FILES=()
+  RULE_TYPES=()
+  RULE_DOMAINS=()
+  RULE_UPSTREAMS=()
+
+  local file domain upstream
+  shopt -s nullglob
+  for file in "$RULES_DIR"/*.wildcard "$RULES_DIR"/*.fixed; do
+    DOMAIN="" UPSTREAM=""
+    # shellcheck disable=SC1090
+    source "$file"
+    domain="$(sanitize_domain "$DOMAIN")"
+    upstream="$UPSTREAM"
+    RULE_FILES+=("$file")
+    RULE_DOMAINS+=("$domain")
+    RULE_UPSTREAMS+=("$upstream")
+    if [[ "$file" == *.wildcard ]]; then
+      RULE_TYPES+=("wildcard")
+    else
+      RULE_TYPES+=("fixed")
+    fi
+  done
+}
+
+rule_label() {
+  local index="$1"
+  local type="${RULE_TYPES[$index]}"
+  local domain="${RULE_DOMAINS[$index]}"
+  local upstream="${RULE_UPSTREAMS[$index]}"
+  if [[ "$type" == "wildcard" ]]; then
+    printf '[泛域名] *.%s, %s -> %s' "$domain" "$domain" "$upstream"
+  else
+    printf '[固定域名] %s -> %s' "$domain" "$upstream"
+  fi
+}
+
+print_rules_numbered() {
+  load_rules
+  echo "当前规则："
+  if [[ "${#RULE_FILES[@]}" -eq 0 ]]; then
+    echo "  暂无规则。"
+    return 0
+  fi
+
+  local i
+  for i in "${!RULE_FILES[@]}"; do
+    printf '  %d) %s\n' "$((i + 1))" "$(rule_label "$i")"
+  done
+}
+
+resolve_rule_input() {
+  local input="$1"
+  local i
+  [[ -n "$input" ]] || return 1
+
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    i=$((input - 1))
+    if (( i >= 0 && i < ${#RULE_FILES[@]} )); then
+      printf '%s' "$i"
+      return 0
+    fi
+  fi
+
+  input="$(sanitize_domain "$input")"
+  input="${input#*.}"
+  for i in "${!RULE_FILES[@]}"; do
+    if [[ "${RULE_DOMAINS[$i]}" == "$input" ]]; then
+      printf '%s' "$i"
+      return 0
+    fi
+    if [[ "${RULE_TYPES[$i]}" == "wildcard" && "$input" == *".${RULE_DOMAINS[$i]}" ]]; then
+      printf '%s' "$i"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+hosts_for_rule() {
+  local index="$1"
+  local domain="${RULE_DOMAINS[$index]}"
+  local type="${RULE_TYPES[$index]}"
+  if [[ "$type" == "wildcard" ]]; then
+    printf '%s\n' "lucky.$domain" "random-check.$domain" "$domain"
+  else
+    printf '%s\n' "$domain"
+  fi
+}
+
+print_rules_compact() {
+  print_rules_numbered
+}
+
+interactive_add_rule() {
+  need_root
+  echo
+  echo "添加反向代理规则"
+  echo "  1) 泛域名：*.example.com 和 example.com 都转发到同一个上游"
+  echo "  2) 固定域名：app.example.com 转发到一个上游"
+  echo
+  local type domain upstream summary
+  read -rp "请选择规则类型 [1/2]：" type
+  case "$type" in
+    1)
+      domain="$(prompt_default "域名，不要带 *" "$DEFAULT_WILDCARD_DOMAIN")"
+      upstream="$(prompt_default "上游地址" "$DEFAULT_WILDCARD_UPSTREAM")"
+      summary="[泛域名] *.$domain, $domain -> $upstream"
+      echo
+      echo "准备添加：$summary"
+      confirm "确认添加吗？" || { echo "已取消。"; return 0; }
+      add_wildcard "$domain" "$upstream"
+      ;;
+    2)
+      domain="$(prompt_default "域名" "$DEFAULT_FIXED_DOMAIN")"
+      upstream="$(prompt_default "上游地址" "$DEFAULT_FIXED_UPSTREAM")"
+      summary="[固定域名] $domain -> $upstream"
+      echo
+      echo "准备添加：$summary"
+      confirm "确认添加吗？" || { echo "已取消。"; return 0; }
+      add_fixed "$domain" "$upstream"
+      ;;
+    *)
+      echo "已取消。"
+      return 0
+      ;;
+  esac
+  if confirm "现在应用并重载 Caddy 吗？"; then
+    apply_config
+  fi
+}
+
+interactive_remove_rule() {
+  need_root
+  echo
+  print_rules_numbered
+  echo
+  if [[ "${#RULE_FILES[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local input index domain label
+  read -rp "输入要删除的序号或域名，直接回车取消：" input
+  [[ -n "$input" ]] || { echo "已取消。"; return 0; }
+
+  if ! index="$(resolve_rule_input "$input")"; then
+    echo "没找到对应规则：$input"
+    return 0
+  fi
+
+  domain="${RULE_DOMAINS[$index]}"
+  label="$(rule_label "$index")"
+  echo "将删除：$label"
+  if confirm "确定删除吗？"; then
+    remove_rule "$domain"
+    if confirm "现在应用并重载 Caddy 吗？"; then
+      apply_config
+    fi
+  fi
+}
+
+interactive_test_domains() {
+  need_root
+  echo
+  print_rules_numbered
+  echo
+  if [[ "${#RULE_FILES[@]}" -eq 0 ]]; then
+    echo "暂无规则可测试。"
+    return 0
+  fi
+
+  echo "可输入："
+  echo "  - 直接回车或 all：测试全部规则"
+  echo "  - 序号：测试某条规则，例如 1"
+  echo "  - 多个序号：测试多条规则，例如 1 2"
+  echo "  - 域名：测试指定域名，例如 app.example.com"
+  echo "  - 多个域名：用空格分隔"
+  echo
+  local input index token hosts=()
+  read -rp "请输入测试目标：" input
+
+  if [[ -z "$input" || "$input" == "all" || "$input" == "ALL" ]]; then
+    test_hosts
+    return 0
+  fi
+
+  for token in $input; do
+    if index="$(resolve_rule_input "$token" 2>/dev/null)"; then
+      while IFS= read -r host; do
+        hosts+=("$host")
+      done < <(hosts_for_rule "$index")
+    else
+      hosts+=("$token")
+    fi
+  done
+
+  test_hosts "${hosts[@]}"
+}
+
+interactive_bootstrap() {
+  need_root
+  echo
+  echo "一条龙安装会安装 Caddy、安装 Cloudflare DNS 插件，"
+  echo "创建默认规则、校验配置，并重载 Caddy。"
+  echo
+  if confirm "继续执行一条龙安装吗？"; then
+    install_caddy
+    ensure_default_config
+    if [[ ! -s "$CF_ENV_FILE" ]] || confirm "要替换当前 Cloudflare token 吗？"; then
+      save_token
+    fi
+    apply_config
+  fi
+}
+
+interactive_menu() {
+  need_root
+  ensure_default_config
+  while true; do
+    clear 2>/dev/null || true
+    echo "CA - Caddy 简易管理工具"
+    echo "规则文件目录：$RULES_DIR"
+    echo
+    print_rules_compact
+    echo
+    echo "1) 一条龙安装/初始化"
+    echo "2) 设置 Cloudflare token"
+    echo "3) 添加反向代理规则"
+    echo "4) 删除规则"
+    echo "5) 应用配置并重载 Caddy"
+    echo "6) 测试域名访问"
+    echo "7) 查看服务状态"
+    echo "8) 查看生成/当前 Caddyfile"
+    echo "9) 查看日志"
+    echo "0) 退出"
+    echo
+    local choice lines
+    read -rp "请选择：" choice
+    case "$choice" in
+      1) interactive_bootstrap; pause ;;
+      2) save_token; pause ;;
+      3) interactive_add_rule; pause ;;
+      4) interactive_remove_rule; pause ;;
+      5) apply_config; pause ;;
+      6) interactive_test_domains; pause ;;
+      7) status; pause ;;
+      8) show_rules | sed -n '1,180p'; pause ;;
+      9)
+        lines="$(prompt_default "日志行数" "80")"
+        logs "$lines"
+        pause
+        ;;
+      0|q|Q|exit) break ;;
+      *) echo "未知选项。"; pause ;;
+    esac
+  done
+}
+
+bootstrap() {
+  need_root
+  local token=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token)
+        token="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "未知 bootstrap 参数：$1"
+        ;;
+    esac
+  done
+  install_caddy
+  ensure_default_config
+  if [[ -n "$token" ]]; then
+    save_token "$token"
+  fi
+  apply_config
+  status
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    install) install_caddy ;;
+    bootstrap) bootstrap "$@" ;;
+    token)
+      case "${1:-}" in
+        set) shift; save_token "${1:-}" ;;
+        check) [[ -s "$CF_ENV_FILE" ]] && echo "token 文件存在：$CF_ENV_FILE" || die "token 文件不存在：$CF_ENV_FILE" ;;
+        *) usage; exit 1 ;;
+      esac
+      ;;
+    apply) apply_config ;;
+    show) show_rules ;;
+    status) status ;;
+    test) test_hosts "$@" ;;
+    logs) logs "${1:-80}" ;;
+    add-wildcard) [[ $# -eq 2 ]] || die "用法：ca add-wildcard DOMAIN UPSTREAM"; add_wildcard "$1" "$2" ;;
+    add-fixed) [[ $# -eq 2 ]] || die "用法：ca add-fixed DOMAIN UPSTREAM"; add_fixed "$1" "$2" ;;
+    remove) [[ $# -eq 1 ]] || die "用法：ca remove DOMAIN"; remove_rule "$1" ;;
+    list) ensure_default_config; find "$RULES_DIR" -maxdepth 1 -type f -print | sort ;;
+    menu) interactive_menu ;;
+    "" ) interactive_menu ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"

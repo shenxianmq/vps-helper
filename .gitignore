@@ -1,0 +1,14 @@
+.DS_Store
+*.log
+*.tmp
+.env
+*.env
+secrets/
+certs/
+keys/
+*.pem
+*.key
+*.crt
+*.p12
+*.sqlite
+*.db
