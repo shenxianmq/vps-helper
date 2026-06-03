@@ -201,12 +201,20 @@ write_token_var() {
   rm -f "$tmp"
 }
 
-ensure_token_for_domain() {
+ensure_rule_token_env() {
+  local domain="$1"
+  local token_env="${2:-}"
+  domain="$(sanitize_domain "$domain")"
+  [[ -n "$token_env" ]] || token_env="$(token_env_for_domain "$domain")"
+  printf '%s' "$token_env"
+}
+
+ensure_token_secret_for_domain() {
   local domain="$1"
   local token_env="${2:-}"
   local token=""
   domain="$(sanitize_domain "$domain")"
-  [[ -n "$token_env" ]] || token_env="$(token_env_for_domain "$domain")"
+  token_env="$(ensure_rule_token_env "$domain" "$token_env")"
 
   ensure_secret_store
   if secret_var_exists "$token_env"; then
@@ -222,11 +230,41 @@ ensure_token_for_domain() {
     return 0
   fi
 
-  read -rsp "请输入 $domain 的 Cloudflare API token：" token
-  echo
-  [[ -n "$token" ]] || die "$domain 的 token 不能为空"
-  write_token_var "$token_env" "$token"
-  printf '%s' "$token_env"
+  if [[ -t 0 ]]; then
+    read -rsp "请输入 $domain 的 Cloudflare API token：" token
+    echo
+    [[ -n "$token" ]] || die "$domain 的 token 不能为空"
+    write_token_var "$token_env" "$token"
+    printf '%s' "$token_env"
+    return 0
+  fi
+
+  die "缺少 $domain 的 Cloudflare token，请先运行：ca token set $domain"
+}
+
+
+ensure_wildcard_token_secrets() {
+  ensure_default_config
+  local file domain upstream insecure token_env
+  shopt -s nullglob
+  for file in "$RULES_DIR"/*.wildcard; do
+    DOMAIN="" UPSTREAM="" INSECURE_SKIP_VERIFY="1" TOKEN_ENV=""
+    # shellcheck disable=SC1090
+    source "$file"
+    domain="$(sanitize_domain "$DOMAIN")"
+    upstream="$UPSTREAM"
+    insecure="$INSECURE_SKIP_VERIFY"
+    token_env="$(ensure_rule_token_env "$domain" "$TOKEN_ENV")"
+    ensure_token_secret_for_domain "$domain" "$token_env" >/dev/null
+    if [[ "${TOKEN_ENV:-}" != "$token_env" ]]; then
+      cat >"$file" <<EOF
+DOMAIN="$domain"
+UPSTREAM="$upstream"
+INSECURE_SKIP_VERIFY="$insecure"
+TOKEN_ENV="$token_env"
+EOF
+    fi
+  done
 }
 
 check_token() {
@@ -261,7 +299,7 @@ add_wildcard() {
   upstream="$2"
   token_env="${3:-}"
   validate_upstream "$upstream"
-  token_env="$(ensure_token_for_domain "$domain" "$token_env")"
+  token_env="$(ensure_token_secret_for_domain "$domain" "$token_env")"
   mkdir -p "$RULES_DIR"
   file="$RULES_DIR/$domain.wildcard"
   cat >"$file" <<EOF
@@ -339,16 +377,8 @@ EOF
     domain="$(sanitize_domain "$DOMAIN")"
     upstream="$UPSTREAM"
     insecure="$INSECURE_SKIP_VERIFY"
-    token_env="$(ensure_token_for_domain "$domain" "$TOKEN_ENV")"
+    token_env="$(ensure_rule_token_env "$domain" "$TOKEN_ENV")"
     validate_upstream "$upstream"
-    if [[ "${TOKEN_ENV:-}" != "$token_env" ]]; then
-      cat >"$file" <<EOF
-DOMAIN="$domain"
-UPSTREAM="$upstream"
-INSECURE_SKIP_VERIFY="$insecure"
-TOKEN_ENV="$token_env"
-EOF
-    fi
     cat <<EOF
 *.$domain, $domain {
 	tls {
@@ -388,8 +418,9 @@ apply_config() {
   local backup tmp
   tmp="$(mktemp)"
   generate_caddyfile >"$tmp"
-  source_token_for_caddy
 
+  ensure_wildcard_token_secrets
+  source_token_for_caddy
   caddy fmt --overwrite "$tmp"
   caddy validate --config "$tmp" --adapter caddyfile
 
