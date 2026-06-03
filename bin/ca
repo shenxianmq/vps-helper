@@ -1086,7 +1086,7 @@ interactive_menu() {
     print_rules_compact
 
     ui_section "初始化与配置"
-    ui_menu_row 1 "一条龙安装/初始化  *"
+    ui_menu_row 1 "一条龙安装/初始化"
     ui_menu_row 2 "设置 Cloudflare token"
     ui_menu_row 3 "应用配置并重载 Caddy"
     ui_menu_row 4 "检查/更新 ca 自身"
@@ -1100,7 +1100,7 @@ interactive_menu() {
     ui_section "验证与真实配置"
     ui_menu_row 9 "测试域名访问"
     ui_menu_row 10 "查看服务状态"
-    ui_menu_row 11 "一键查看真实 Caddyfile  *"
+    ui_menu_row 11 "一键查看真实 Caddyfile"
     ui_menu_row 12 "查看 Caddy 日志"
 
     ui_border "="
