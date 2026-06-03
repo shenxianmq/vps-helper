@@ -57,6 +57,50 @@ ui_repeat() {
   printf '%*s' "$count" '' | tr ' ' "$char"
 }
 
+text_width() {
+  local text="$1"
+  local width=0 i ch bytes
+  local old_lc="${LC_ALL:-}"
+
+  LC_ALL=C
+  for ((i = 0; i < ${#text}; )); do
+    bytes=$(printf '%d' "'${text:i:1}")
+    if (( bytes < 128 )); then
+      ((width += 1))
+      ((i += 1))
+    elif (( bytes >= 224 && bytes < 240 )); then
+      ch="${text:i:3}"
+      case "$ch" in
+        "·"|"…") ((width += 1)) ;;
+        *) ((width += 2)) ;;
+      esac
+      ((i += 3))
+    elif (( bytes >= 240 )); then
+      ((width += 2))
+      ((i += 4))
+    else
+      ((width += 1))
+      ((i += 2))
+    fi
+  done
+  if [[ -n "$old_lc" ]]; then
+    LC_ALL="$old_lc"
+  else
+    unset LC_ALL
+  fi
+  printf '%s' "$width"
+}
+
+pad_display() {
+  local text="$1"
+  local target="$2"
+  local width pad
+  width="$(text_width "$text")"
+  pad=$((target - width))
+  ((pad < 0)) && pad=0
+  printf '%s%*s' "$text" "$pad" ''
+}
+
 ui_border() {
   local char="${1:-=}"
   printf '%s+%s+%s\n' "$C_CYAN" "$(ui_repeat "$char")" "$C_RESET"
@@ -85,10 +129,13 @@ ui_menu_row() {
   local left_label="$2"
   local right_no="${3:-}"
   local right_label="${4:-}"
+  local left_text right_text
+  left_text="$(printf '%2s. %s' "$left_no" "$left_label")"
   if [[ -n "$right_no" ]]; then
-    printf '%s%2s.%s %-32s  %s%2s.%s %s\n' \
-      "$C_CYAN" "$left_no" "$C_RESET" "$left_label" \
-      "$C_CYAN" "$right_no" "$C_RESET" "$right_label"
+    right_text="$(printf '%2s. %s' "$right_no" "$right_label")"
+    printf '%s%s%s  %s%s%s\n' \
+      "$C_CYAN" "${left_text%%.*}." "$C_RESET$(pad_display " ${left_label}" 34)" \
+      "$C_CYAN" "${right_text%%.*}." "$C_RESET ${right_label}"
   else
     printf '%s%2s.%s %s\n' "$C_CYAN" "$left_no" "$C_RESET" "$left_label"
   fi
@@ -883,8 +930,14 @@ print_rules_compact() {
     return 0
   fi
 
-  local i type_label domain upstream
-  printf '  %s%-4s %-8s %-30s %s%s\n' "$C_DIM" "编号" "类型" "域名" "上游" "$C_RESET"
+  local i type_label domain upstream no_text
+  printf '  %s%s %s %s %s%s\n' \
+    "$C_DIM" \
+    "$(pad_display "编号" 4)" \
+    "$(pad_display "类型" 8)" \
+    "$(pad_display "域名" 30)" \
+    "上游" \
+    "$C_RESET"
   for i in "${!RULE_FILES[@]}"; do
     if [[ "${RULE_TYPES[$i]}" == "wildcard" ]]; then
       type_label="泛域名"
@@ -894,7 +947,12 @@ print_rules_compact() {
       domain="${RULE_DOMAINS[$i]}"
     fi
     upstream="${RULE_UPSTREAMS[$i]}"
-    printf '  %s%2d%s   %-8s %-30s %s\n' "$C_CYAN" "$((i + 1))" "$C_RESET" "$type_label" "$domain" "$upstream"
+    no_text="$(printf '%2d' "$((i + 1))")"
+    printf '  %s%s%s   %s %s %s\n' \
+      "$C_CYAN" "$no_text" "$C_RESET" \
+      "$(pad_display "$type_label" 8)" \
+      "$(pad_display "$domain" 30)" \
+      "$upstream"
   done
 }
 
