@@ -399,10 +399,16 @@ update_ca() {
   curl -fsSL "$CA_UPDATE_URL" -o "$tmp"
   bash -n "$tmp"
 
-  if grep -nE 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9_./:+-]{20,}|BEGIN (RSA |EC |OPENSSH |PRIVATE)|PRIVATE KEY-----' "$tmp" >/dev/null; then
-    rm -f "$tmp"
-    die "下载内容命中敏感关键字，已取消更新"
-  fi
+  local token_pattern private_begin_pattern private_key_pattern
+  token_pattern='CLOUDFLARE_API_TOKEN=[A-Za-z0-9_./:+-]{20,}'
+  private_begin_pattern='BEGIN ''(RSA |EC |OPENSSH |PRIVATE)'
+  private_key_pattern='PRIVATE KEY''-----'
+  for pattern in "$token_pattern" "$private_begin_pattern" "$private_key_pattern"; do
+    if grep -nE "$pattern" "$tmp" >/dev/null; then
+      rm -f "$tmp"
+      die "下载内容命中敏感关键字，已取消更新"
+    fi
+  done
 
   current_hash="$(sha256sum "$self" | awk '{print $1}')"
   new_hash="$(sha256sum "$tmp" | awk '{print $1}')"
