@@ -1111,12 +1111,12 @@ interactive_menu() {
     ui_menu_row 3 "应用配置并重载 Caddy" 4 "检查/更新 ca 自身"
 
     ui_section "反向代理规则"
-    ui_menu_row 11 "添加反向代理规则  >" 12 "删除规则"
-    ui_menu_row 13 "列出规则文件" 14 "查看规则与生成预览  >"
+    ui_menu_row 5 "添加反向代理规则  >" 6 "删除规则"
+    ui_menu_row 7 "列出规则文件" 8 "查看规则与生成预览  >"
 
     ui_section "验证与真实配置"
-    ui_menu_row 21 "测试域名访问" 22 "查看服务状态"
-    ui_menu_row 23 "一键查看真实 Caddyfile  *" 24 "查看 Caddy 日志"
+    ui_menu_row 9 "测试域名访问" 10 "查看服务状态"
+    ui_menu_row 11 "一键查看真实 Caddyfile  *" 12 "查看 Caddy 日志"
 
     echo
     ui_border "="
@@ -1130,14 +1130,14 @@ interactive_menu() {
       2) interactive_set_token; pause ;;
       3) apply_config; pause ;;
       4) interactive_update_ca; pause ;;
-      11) interactive_add_rule; pause ;;
-      12) interactive_remove_rule; pause ;;
-      13) ensure_default_config; find "$RULES_DIR" -maxdepth 1 -type f -print | sort; pause ;;
-      14) show_rules | sed -n '1,220p'; pause ;;
-      21) interactive_test_domains; pause ;;
-      22) status; pause ;;
-      23) show_caddyfile; pause ;;
-      24)
+      5) interactive_add_rule; pause ;;
+      6) interactive_remove_rule; pause ;;
+      7) ensure_default_config; find "$RULES_DIR" -maxdepth 1 -type f -print | sort; pause ;;
+      8) show_rules | sed -n '1,220p'; pause ;;
+      9) interactive_test_domains; pause ;;
+      10) status; pause ;;
+      11) show_caddyfile; pause ;;
+      12)
         lines="$(prompt_default "日志行数" "80")"
         logs "$lines"
         pause
