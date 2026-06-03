@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="ca"
+APP_TITLE="CA - Caddy 管理工具"
 CONFIG_DIR="/etc/ca-manager"
 RULES_DIR="$CONFIG_DIR/rules.d"
 CONFIG_FILE="$CONFIG_DIR/config.env"
@@ -29,6 +30,74 @@ log() {
   printf '[%s] %s\n' "$APP_NAME" "$*"
 }
 
+UI_WIDTH="${CA_UI_WIDTH:-78}"
+C_RESET=""
+C_DIM=""
+C_BOLD=""
+C_CYAN=""
+C_GREEN=""
+C_YELLOW=""
+C_RED=""
+
+color_setup() {
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]] && command -v tput >/dev/null 2>&1; then
+    C_RESET="$(tput sgr0 2>/dev/null || true)"
+    C_DIM="$(tput dim 2>/dev/null || true)"
+    C_BOLD="$(tput bold 2>/dev/null || true)"
+    C_CYAN="$(tput setaf 6 2>/dev/null || true)"
+    C_GREEN="$(tput setaf 2 2>/dev/null || true)"
+    C_YELLOW="$(tput setaf 3 2>/dev/null || true)"
+    C_RED="$(tput setaf 1 2>/dev/null || true)"
+  fi
+}
+
+ui_repeat() {
+  local char="$1"
+  local count="${2:-$UI_WIDTH}"
+  printf '%*s' "$count" '' | tr ' ' "$char"
+}
+
+ui_border() {
+  local char="${1:-=}"
+  printf '%s+%s+%s\n' "$C_CYAN" "$(ui_repeat "$char")" "$C_RESET"
+}
+
+ui_rule() {
+  printf '%s%s%s\n' "$C_CYAN" "$(ui_repeat '-')" "$C_RESET"
+}
+
+ui_title() {
+  local title="$1"
+  ui_border "="
+  printf '%s#  %s%s%s\n' "$C_CYAN" "$C_BOLD" "$title" "$C_RESET"
+  ui_border "="
+}
+
+ui_section() {
+  local title="$1"
+  echo
+  printf '%s%s%s\n' "$C_CYAN" "$(ui_repeat '-')" "$C_RESET"
+  printf '%s%s%s\n' "$C_BOLD" "$title" "$C_RESET"
+}
+
+ui_menu_row() {
+  local left_no="$1"
+  local left_label="$2"
+  local right_no="${3:-}"
+  local right_label="${4:-}"
+  if [[ -n "$right_no" ]]; then
+    printf '%s%2s.%s %-32s  %s%2s.%s %s\n' \
+      "$C_CYAN" "$left_no" "$C_RESET" "$left_label" \
+      "$C_CYAN" "$right_no" "$C_RESET" "$right_label"
+  else
+    printf '%s%2s.%s %s\n' "$C_CYAN" "$left_no" "$C_RESET" "$left_label"
+  fi
+}
+
+ui_prompt() {
+  printf '%s->%s 请输入选项：' "$C_CYAN" "$C_RESET"
+}
+
 usage() {
   cat <<'EOF'
 ca - Caddy 简易反向代理管理工具
@@ -40,6 +109,7 @@ ca - Caddy 简易反向代理管理工具
   ca token check [DOMAIN]              检查 token 文件或某个域名的 token 是否存在
   ca apply                           生成 Caddyfile、校验并重载 Caddy
   ca show                            查看规则和当前 Caddyfile
+  ca caddyfile                       一键查看当前真实 Caddyfile
   ca status                          查看 Caddy 状态、监听端口和模块
   ca test [host ...]                 测试已配置或指定的域名
   ca logs [N]                        查看最近的 Caddy 日志，默认 80 行
@@ -513,6 +583,18 @@ show_rules() {
   [[ -f "$CADDYFILE" ]] && nl -ba "$CADDYFILE" || echo "$CADDYFILE 不存在"
 }
 
+show_caddyfile() {
+  echo "== 当前真实 Caddyfile =="
+  echo "路径：$CADDYFILE"
+  echo
+  if [[ ! -f "$CADDYFILE" ]]; then
+    echo "$CADDYFILE 不存在"
+    return 1
+  fi
+
+  nl -ba "$CADDYFILE"
+}
+
 status() {
   echo "== Caddy 信息 =="
   command -v caddy || true
@@ -750,7 +832,26 @@ hosts_for_rule() {
 }
 
 print_rules_compact() {
-  print_rules_numbered
+  load_rules
+  printf '%s当前规则%s\n' "$C_BOLD" "$C_RESET"
+  if [[ "${#RULE_FILES[@]}" -eq 0 ]]; then
+    printf '  %s暂无规则。%s\n' "$C_DIM" "$C_RESET"
+    return 0
+  fi
+
+  local i type_label domain upstream
+  printf '  %s%-4s %-8s %-30s %s%s\n' "$C_DIM" "编号" "类型" "域名" "上游" "$C_RESET"
+  for i in "${!RULE_FILES[@]}"; do
+    if [[ "${RULE_TYPES[$i]}" == "wildcard" ]]; then
+      type_label="泛域名"
+      domain="*.${RULE_DOMAINS[$i]}"
+    else
+      type_label="固定"
+      domain="${RULE_DOMAINS[$i]}"
+    fi
+    upstream="${RULE_UPSTREAMS[$i]}"
+    printf '  %s%2d%s   %-8s %-30s %s\n' "$C_CYAN" "$((i + 1))" "$C_RESET" "$type_label" "$domain" "$upstream"
+  done
 }
 
 interactive_add_rule() {
@@ -896,40 +997,49 @@ interactive_menu() {
   ensure_default_config
   while true; do
     clear 2>/dev/null || true
-    echo "CA - Caddy 管理工具"
-    echo "规则文件目录：$RULES_DIR"
-    echo
+    color_setup
+    ui_title "$APP_TITLE (Caddy Assistant)"
+    printf '%s规则目录：%s%s%s\n' "$C_DIM" "$C_RESET" "$RULES_DIR" "$C_RESET"
+    printf '%s真实配置：%s%s%s\n' "$C_DIM" "$C_RESET" "$CADDYFILE" "$C_RESET"
+    ui_rule
     print_rules_compact
+
+    ui_section "初始化与配置"
+    ui_menu_row 1 "一条龙安装/初始化  *" 2 "设置 Cloudflare token"
+    ui_menu_row 3 "应用配置并重载 Caddy" 4 "检查/更新 ca 自身"
+
+    ui_section "反向代理规则"
+    ui_menu_row 11 "添加反向代理规则  >" 12 "删除规则"
+    ui_menu_row 13 "列出规则文件" 14 "查看规则与生成预览  >"
+
+    ui_section "验证与真实配置"
+    ui_menu_row 21 "测试域名访问" 22 "查看服务状态"
+    ui_menu_row 23 "一键查看真实 Caddyfile  *" 24 "查看 Caddy 日志"
+
     echo
-    echo "1) 一条龙安装/初始化"
-    echo "2) 设置某个域名的 Cloudflare token"
-    echo "3) 添加反向代理规则"
-    echo "4) 删除规则"
-    echo "5) 应用配置并重载 Caddy"
-    echo "6) 测试域名访问"
-    echo "7) 查看服务状态"
-    echo "8) 查看生成/当前 Caddyfile"
-    echo "9) 查看日志"
-    echo "10) 检查/更新 ca 自身"
-    echo "0) 退出"
-    echo
+    ui_border "="
+    ui_menu_row 0 "退出"
+    ui_border "="
     local choice lines
-    read -rp "请选择：" choice
+    ui_prompt
+    read -r choice
     case "$choice" in
       1) interactive_bootstrap; pause ;;
       2) interactive_set_token; pause ;;
-      3) interactive_add_rule; pause ;;
-      4) interactive_remove_rule; pause ;;
-      5) apply_config; pause ;;
-      6) interactive_test_domains; pause ;;
-      7) status; pause ;;
-      8) show_rules | sed -n '1,180p'; pause ;;
-      9)
+      3) apply_config; pause ;;
+      4) interactive_update_ca; pause ;;
+      11) interactive_add_rule; pause ;;
+      12) interactive_remove_rule; pause ;;
+      13) ensure_default_config; find "$RULES_DIR" -maxdepth 1 -type f -print | sort; pause ;;
+      14) show_rules | sed -n '1,220p'; pause ;;
+      21) interactive_test_domains; pause ;;
+      22) status; pause ;;
+      23) show_caddyfile; pause ;;
+      24)
         lines="$(prompt_default "日志行数" "80")"
         logs "$lines"
         pause
         ;;
-      10) interactive_update_ca; pause ;;
       0|q|Q|exit) break ;;
       *) echo "未知选项。"; pause ;;
     esac
@@ -966,6 +1076,7 @@ main() {
       ;;
     apply) apply_config ;;
     show) show_rules ;;
+    caddyfile|cat-caddyfile|real-caddyfile) show_caddyfile ;;
     status) status ;;
     test) test_hosts "$@" ;;
     logs) logs "${1:-80}" ;;
