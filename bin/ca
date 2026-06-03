@@ -391,12 +391,18 @@ update_ca() {
   need_root
   command -v curl >/dev/null 2>&1 || die "需要先安装 curl"
 
-  local self tmp backup current_hash new_hash
+  local self tmp backup current_hash new_hash update_url
   self="$(readlink -f "${BASH_SOURCE[0]}")"
   tmp="$(mktemp)"
+  update_url="$CA_UPDATE_URL"
+  if [[ "$update_url" == *\?* ]]; then
+    update_url="${update_url}&_ca_update=$(date +%s)"
+  else
+    update_url="${update_url}?_ca_update=$(date +%s)"
+  fi
 
   log "正在下载最新版 ca"
-  curl -fsSL "$CA_UPDATE_URL" -o "$tmp"
+  curl -fsSL "$update_url" -o "$tmp"
   bash -n "$tmp"
 
   local token_pattern private_begin_pattern private_key_pattern
