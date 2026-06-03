@@ -751,15 +751,11 @@ cleanup_prepared_ca_update() {
 }
 
 install_prepared_ca_update() {
-  local backup
   [[ -n "${CA_UPDATE_SELF:-}" && -n "${CA_UPDATE_TMP:-}" ]] || die "没有可安装的 ca 更新包"
 
-  backup="$CA_UPDATE_SELF.before-update.$(date +%Y%m%d%H%M%S)"
-  cp "$CA_UPDATE_SELF" "$backup"
   install -m 0755 "$CA_UPDATE_TMP" "$CA_UPDATE_SELF"
   cleanup_prepared_ca_update
   echo "已更新 ca。"
-  echo "旧版本备份：$backup"
 }
 
 update_ca() {
