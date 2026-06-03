@@ -761,11 +761,6 @@ interactive_update_ca() {
   need_root
   ca_version_info
   echo
-  if ! confirm "现在检查远端版本吗？"; then
-    return 0
-  fi
-
-  echo
   if ! prepare_ca_update; then
     cleanup_prepared_ca_update
     return 0
