@@ -9,6 +9,7 @@ CADDYFILE="/etc/caddy/Caddyfile"
 CF_ENV_FILE="/etc/caddy/secrets/cloudflare.env"
 SYSTEMD_DROPIN_DIR="/etc/systemd/system/caddy.service.d"
 SYSTEMD_DROPIN="$SYSTEMD_DROPIN_DIR/10-cloudflare-env.conf"
+CA_UPDATE_URL="${CA_UPDATE_URL:-https://raw.githubusercontent.com/shenxianmq/vps-helper/main/bin/ca}"
 
 die() {
   echo "错误：$*" >&2
@@ -39,6 +40,7 @@ ca - Caddy 简易反向代理管理工具
   ca status                          查看 Caddy 状态、监听端口和模块
   ca test [host ...]                 测试已配置或指定的域名
   ca logs [N]                        查看最近的 Caddy 日志，默认 80 行
+  ca update                          从 GitHub 检查并更新 ca 自身
   ca add-wildcard DOMAIN UPSTREAM    添加泛域名规则：*.DOMAIN 和 DOMAIN -> UPSTREAM
   ca add-fixed DOMAIN UPSTREAM       添加固定域名规则：DOMAIN -> UPSTREAM
   ca remove DOMAIN                   删除指定域名的规则
@@ -375,6 +377,61 @@ logs() {
   journalctl -u caddy -n "$lines" --no-pager
 }
 
+ca_version_info() {
+  local self
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  echo "当前脚本：$self"
+  echo "更新地址：$CA_UPDATE_URL"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$self" | awk '{print "当前 SHA256：" $1}'
+  fi
+}
+
+update_ca() {
+  need_root
+  command -v curl >/dev/null 2>&1 || die "需要先安装 curl"
+
+  local self tmp backup current_hash new_hash
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  tmp="$(mktemp)"
+
+  log "正在下载最新版 ca"
+  curl -fsSL "$CA_UPDATE_URL" -o "$tmp"
+  bash -n "$tmp"
+
+  if grep -nE 'CLOUDFLARE_API_TOKEN=[^$[:space:]]+|BEGIN (RSA |EC |OPENSSH |PRIVATE)|PRIVATE KEY-----|password=|secret=|token=' "$tmp" >/dev/null; then
+    rm -f "$tmp"
+    die "下载内容命中敏感关键字，已取消更新"
+  fi
+
+  current_hash="$(sha256sum "$self" | awk '{print $1}')"
+  new_hash="$(sha256sum "$tmp" | awk '{print $1}')"
+
+  echo "当前 SHA256：$current_hash"
+  echo "远端 SHA256：$new_hash"
+  if [[ "$current_hash" == "$new_hash" ]]; then
+    rm -f "$tmp"
+    echo "已经是最新版。"
+    return 0
+  fi
+
+  backup="$self.before-update.$(date +%Y%m%d%H%M%S)"
+  cp "$self" "$backup"
+  install -m 0755 "$tmp" "$self"
+  rm -f "$tmp"
+  echo "已更新 ca。"
+  echo "旧版本备份：$backup"
+}
+
+interactive_update_ca() {
+  need_root
+  ca_version_info
+  echo
+  if confirm "现在检查并更新 ca 吗？"; then
+    update_ca
+  fi
+}
+
 pause() {
   echo
   read -rp "按回车继续..." _
@@ -641,6 +698,7 @@ interactive_menu() {
     echo "7) 查看服务状态"
     echo "8) 查看生成/当前 Caddyfile"
     echo "9) 查看日志"
+    echo "10) 检查/更新 ca 自身"
     echo "0) 退出"
     echo
     local choice lines
@@ -659,6 +717,7 @@ interactive_menu() {
         logs "$lines"
         pause
         ;;
+      10) interactive_update_ca; pause ;;
       0|q|Q|exit) break ;;
       *) echo "未知选项。"; pause ;;
     esac
@@ -706,6 +765,7 @@ main() {
     status) status ;;
     test) test_hosts "$@" ;;
     logs) logs "${1:-80}" ;;
+    update) update_ca ;;
     add-wildcard) [[ $# -eq 2 ]] || die "用法：ca add-wildcard DOMAIN UPSTREAM"; add_wildcard "$1" "$2" ;;
     add-fixed) [[ $# -eq 2 ]] || die "用法：ca add-fixed DOMAIN UPSTREAM"; add_fixed "$1" "$2" ;;
     remove) [[ $# -eq 1 ]] || die "用法：ca remove DOMAIN"; remove_rule "$1" ;;

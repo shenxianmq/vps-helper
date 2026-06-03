@@ -52,6 +52,7 @@ sudo ca add-fixed DOMAIN UPSTREAM
 sudo ca apply
 sudo ca test
 sudo ca status
+sudo ca update
 ```
 
 ## 目标机器上的文件
