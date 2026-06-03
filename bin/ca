@@ -7,6 +7,7 @@ RULES_DIR="$CONFIG_DIR/rules.d"
 CONFIG_FILE="$CONFIG_DIR/config.env"
 CADDYFILE="/etc/caddy/Caddyfile"
 CF_ENV_FILE="/etc/caddy/secrets/cloudflare.env"
+CF_SECRETS_DIR="$(dirname "$CF_ENV_FILE")"
 SYSTEMD_DROPIN_DIR="/etc/systemd/system/caddy.service.d"
 SYSTEMD_DROPIN="$SYSTEMD_DROPIN_DIR/10-cloudflare-env.conf"
 CA_UPDATE_URL="${CA_UPDATE_URL:-https://api.github.com/repos/shenxianmq/vps-helper/contents/bin/ca?ref=main}"
@@ -32,9 +33,9 @@ ca - Caddy 简易反向代理管理工具
 
 用法：
   ca install                         安装/启用 Caddy，并安装 Cloudflare DNS 插件
-  ca bootstrap [--token TOKEN]        一条龙安装：保存 token、校验并应用当前规则
-  ca token set [TOKEN]                安全保存 Cloudflare API token
-  ca token check                      检查 token 文件是否存在
+  ca bootstrap                        一条龙安装：校验并应用当前规则
+  ca token set DOMAIN [TOKEN]          设置某个域名的 Cloudflare API token
+  ca token check [DOMAIN]              检查 token 文件或某个域名的 token 是否存在
   ca apply                           生成 Caddyfile、校验并重载 Caddy
   ca show                            查看规则和当前 Caddyfile
   ca status                          查看 Caddy 状态、监听端口和模块
@@ -47,7 +48,8 @@ ca - Caddy 简易反向代理管理工具
   ca list                            列出规则文件
 
 示例：
-  ca bootstrap --token 'cloudflare_token_here'
+  ca bootstrap
+  ca token set DOMAIN
   ca add-wildcard DOMAIN UPSTREAM
   ca add-fixed DOMAIN UPSTREAM
   ca apply
@@ -125,9 +127,9 @@ install_caddy() {
     log "Cloudflare DNS 插件已存在"
   fi
 
-  mkdir -p /etc/caddy/secrets "$SYSTEMD_DROPIN_DIR"
-  chown root:caddy /etc/caddy/secrets 2>/dev/null || chown root:root /etc/caddy/secrets
-  chmod 0750 /etc/caddy/secrets
+  mkdir -p "$CF_SECRETS_DIR" "$SYSTEMD_DROPIN_DIR"
+  chown root:caddy "$CF_SECRETS_DIR" 2>/dev/null || chown root:root "$CF_SECRETS_DIR"
+  chmod 0750 "$CF_SECRETS_DIR"
 
   cat >"$SYSTEMD_DROPIN" <<EOF
 [Service]
@@ -140,18 +142,25 @@ EOF
 
 save_token() {
   need_root
-  local token="${1:-}"
+  local domain="${1:-}"
+  local token="${2:-}"
+  [[ -n "$domain" ]] || die "请指定域名：ca token set DOMAIN"
+  domain="$(sanitize_domain "$domain")"
   if [[ -z "$token" ]]; then
-    read -rsp "请输入 Cloudflare API token：" token
+    read -rsp "请输入 $domain 的 Cloudflare API token：" token
     echo
   fi
   [[ -n "$token" ]] || die "token 不能为空"
 
-  mkdir -p /etc/caddy/secrets "$SYSTEMD_DROPIN_DIR"
-  umask 0077
-  cat >"$CF_ENV_FILE" <<EOF
-CLOUDFLARE_API_TOKEN=$token
-EOF
+  local token_env
+  token_env="$(token_env_for_domain "$domain")"
+  write_token_var "$token_env" "$token"
+  log "$domain 的 token 已保存为变量 $token_env"
+}
+
+ensure_secret_store() {
+  mkdir -p "$CF_SECRETS_DIR" "$SYSTEMD_DROPIN_DIR"
+  touch "$CF_ENV_FILE"
   chown root:caddy "$CF_ENV_FILE" 2>/dev/null || chown root:root "$CF_ENV_FILE"
   chmod 0640 "$CF_ENV_FILE"
 
@@ -160,15 +169,85 @@ EOF
 EnvironmentFile=$CF_ENV_FILE
 EOF
   systemctl daemon-reload
-  log "token 已保存到 $CF_ENV_FILE"
 }
 
-require_token() {
-  [[ -s "$CF_ENV_FILE" ]] || die "缺少 Cloudflare token，请先运行：ca token set"
+token_env_for_domain() {
+  local domain="$1"
+  domain="$(sanitize_domain "$domain")"
+  printf 'CF_TOKEN_%s' "$(printf '%s' "$domain" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]/_/g')"
+}
+
+secret_var_exists() {
+  local name="$1"
+  [[ -f "$CF_ENV_FILE" ]] && grep -qE "^${name}=" "$CF_ENV_FILE"
+}
+
+secret_var_value() {
+  local name="$1"
+  [[ -f "$CF_ENV_FILE" ]] || return 1
+  grep -E "^${name}=" "$CF_ENV_FILE" | tail -n 1 | sed -E "s/^${name}=//"
+}
+
+write_token_var() {
+  local name="$1"
+  local value="$2"
+  ensure_secret_store
+  local tmp
+  tmp="$(mktemp)"
+  grep -vE "^${name}=" "$CF_ENV_FILE" >"$tmp" || true
+  printf '%s=%s\n' "$name" "$value" >>"$tmp"
+  install -m 0640 "$tmp" "$CF_ENV_FILE"
+  chown root:caddy "$CF_ENV_FILE" 2>/dev/null || chown root:root "$CF_ENV_FILE"
+  rm -f "$tmp"
+}
+
+ensure_token_for_domain() {
+  local domain="$1"
+  local token_env="${2:-}"
+  local token=""
+  domain="$(sanitize_domain "$domain")"
+  [[ -n "$token_env" ]] || token_env="$(token_env_for_domain "$domain")"
+
+  ensure_secret_store
+  if secret_var_exists "$token_env"; then
+    printf '%s' "$token_env"
+    return 0
+  fi
+
+  if secret_var_exists "CLOUDFLARE_API_TOKEN"; then
+    token="$(secret_var_value "CLOUDFLARE_API_TOKEN")"
+    write_token_var "$token_env" "$token"
+    printf '[%s] 已将旧全局 token 迁移为 %s 的变量 %s\n' "$APP_NAME" "$domain" "$token_env" >&2
+    printf '%s' "$token_env"
+    return 0
+  fi
+
+  read -rsp "请输入 $domain 的 Cloudflare API token：" token
+  echo
+  [[ -n "$token" ]] || die "$domain 的 token 不能为空"
+  write_token_var "$token_env" "$token"
+  printf '%s' "$token_env"
+}
+
+check_token() {
+  local domain="${1:-}"
+  if [[ -z "$domain" ]]; then
+    [[ -s "$CF_ENV_FILE" ]] && echo "token 文件存在：$CF_ENV_FILE" || die "token 文件不存在：$CF_ENV_FILE"
+    return 0
+  fi
+
+  domain="$(sanitize_domain "$domain")"
+  local token_env
+  token_env="$(token_env_for_domain "$domain")"
+  if secret_var_exists "$token_env"; then
+    echo "$domain 的 token 存在：$token_env"
+  else
+    die "$domain 的 token 不存在：$token_env"
+  fi
 }
 
 source_token_for_caddy() {
-  require_token
+  [[ -s "$CF_ENV_FILE" ]] || return 0
   set -a
   # shellcheck disable=SC1090
   source "$CF_ENV_FILE"
@@ -177,18 +256,21 @@ source_token_for_caddy() {
 
 add_wildcard() {
   need_root
-  local domain upstream file
+  local domain upstream file token_env
   domain="$(sanitize_domain "$1")"
   upstream="$2"
+  token_env="${3:-}"
   validate_upstream "$upstream"
+  token_env="$(ensure_token_for_domain "$domain" "$token_env")"
   mkdir -p "$RULES_DIR"
   file="$RULES_DIR/$domain.wildcard"
   cat >"$file" <<EOF
 DOMAIN="$domain"
 UPSTREAM="$upstream"
 INSECURE_SKIP_VERIFY="1"
+TOKEN_ENV="$token_env"
 EOF
-  log "已添加泛域名规则：*.$domain, $domain -> $upstream"
+  log "已添加泛域名规则：*.$domain, $domain -> $upstream，token 变量：$token_env"
 }
 
 add_fixed() {
@@ -248,20 +330,29 @@ generate_caddyfile() {
 
 EOF
 
-  local file domain upstream insecure
+  local file domain upstream insecure token_env
   shopt -s nullglob
   for file in "$RULES_DIR"/*.wildcard; do
-    DOMAIN="" UPSTREAM="" INSECURE_SKIP_VERIFY="1"
+    DOMAIN="" UPSTREAM="" INSECURE_SKIP_VERIFY="1" TOKEN_ENV=""
     # shellcheck disable=SC1090
     source "$file"
     domain="$(sanitize_domain "$DOMAIN")"
     upstream="$UPSTREAM"
     insecure="$INSECURE_SKIP_VERIFY"
+    token_env="$(ensure_token_for_domain "$domain" "$TOKEN_ENV")"
     validate_upstream "$upstream"
+    if [[ "${TOKEN_ENV:-}" != "$token_env" ]]; then
+      cat >"$file" <<EOF
+DOMAIN="$domain"
+UPSTREAM="$upstream"
+INSECURE_SKIP_VERIFY="$insecure"
+TOKEN_ENV="$token_env"
+EOF
+    fi
     cat <<EOF
 *.$domain, $domain {
 	tls {
-		dns cloudflare {\$CLOUDFLARE_API_TOKEN}
+		dns cloudflare {\$$token_env}
 	}
 
 EOF
@@ -294,10 +385,10 @@ EOF
 apply_config() {
   need_root
   ensure_default_config
-  source_token_for_caddy
   local backup tmp
   tmp="$(mktemp)"
   generate_caddyfile >"$tmp"
+  source_token_for_caddy
 
   caddy fmt --overwrite "$tmp"
   caddy validate --config "$tmp" --adapter caddyfile
@@ -467,6 +558,7 @@ RULE_FILES=()
 RULE_TYPES=()
 RULE_DOMAINS=()
 RULE_UPSTREAMS=()
+RULE_TOKEN_ENVS=()
 
 load_rules() {
   ensure_default_config
@@ -474,11 +566,12 @@ load_rules() {
   RULE_TYPES=()
   RULE_DOMAINS=()
   RULE_UPSTREAMS=()
+  RULE_TOKEN_ENVS=()
 
-  local file domain upstream
+  local file domain upstream token_env
   shopt -s nullglob
   for file in "$RULES_DIR"/*.wildcard "$RULES_DIR"/*.fixed; do
-    DOMAIN="" UPSTREAM=""
+    DOMAIN="" UPSTREAM="" TOKEN_ENV=""
     # shellcheck disable=SC1090
     source "$file"
     domain="$(sanitize_domain "$DOMAIN")"
@@ -488,8 +581,11 @@ load_rules() {
     RULE_UPSTREAMS+=("$upstream")
     if [[ "$file" == *.wildcard ]]; then
       RULE_TYPES+=("wildcard")
+      token_env="${TOKEN_ENV:-$(token_env_for_domain "$domain")}"
+      RULE_TOKEN_ENVS+=("$token_env")
     else
       RULE_TYPES+=("fixed")
+      RULE_TOKEN_ENVS+=("")
     fi
   done
 }
@@ -500,7 +596,7 @@ rule_label() {
   local domain="${RULE_DOMAINS[$index]}"
   local upstream="${RULE_UPSTREAMS[$index]}"
   if [[ "$type" == "wildcard" ]]; then
-    printf '[泛域名] *.%s, %s -> %s' "$domain" "$domain" "$upstream"
+    printf '[泛域名] *.%s, %s -> %s，token 变量：%s' "$domain" "$domain" "$upstream" "${RULE_TOKEN_ENVS[$index]}"
   else
     printf '[固定域名] %s -> %s' "$domain" "$upstream"
   fi
@@ -602,6 +698,26 @@ interactive_add_rule() {
   fi
 }
 
+interactive_set_token() {
+  need_root
+  echo
+  print_rules_numbered
+  echo
+  echo "可输入泛域名规则序号，或直接输入要设置 token 的根域名。"
+  local input index domain
+  read -rp "请输入序号或域名，直接回车取消：" input
+  [[ -n "$input" ]] || { echo "已取消。"; return 0; }
+
+  if index="$(resolve_rule_input "$input" 2>/dev/null)" && [[ "${RULE_TYPES[$index]}" == "wildcard" ]]; then
+    domain="${RULE_DOMAINS[$index]}"
+  else
+    domain="$(sanitize_domain "$input")"
+    domain="${domain#*.}"
+  fi
+
+  save_token "$domain"
+}
+
 interactive_remove_rule() {
   need_root
   echo
@@ -678,9 +794,6 @@ interactive_bootstrap() {
   if confirm "继续执行一条龙安装吗？"; then
     install_caddy
     ensure_default_config
-    if [[ ! -s "$CF_ENV_FILE" ]] || confirm "要替换当前 Cloudflare token 吗？"; then
-      save_token
-    fi
     apply_config
   fi
 }
@@ -696,7 +809,7 @@ interactive_menu() {
     print_rules_compact
     echo
     echo "1) 一条龙安装/初始化"
-    echo "2) 设置 Cloudflare token"
+    echo "2) 设置某个域名的 Cloudflare token"
     echo "3) 添加反向代理规则"
     echo "4) 删除规则"
     echo "5) 应用配置并重载 Caddy"
@@ -711,7 +824,7 @@ interactive_menu() {
     read -rp "请选择：" choice
     case "$choice" in
       1) interactive_bootstrap; pause ;;
-      2) save_token; pause ;;
+      2) interactive_set_token; pause ;;
       3) interactive_add_rule; pause ;;
       4) interactive_remove_rule; pause ;;
       5) apply_config; pause ;;
@@ -732,13 +845,8 @@ interactive_menu() {
 
 bootstrap() {
   need_root
-  local token=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token)
-        token="${2:-}"
-        shift 2
-        ;;
       *)
         die "未知 bootstrap 参数：$1"
         ;;
@@ -746,9 +854,6 @@ bootstrap() {
   done
   install_caddy
   ensure_default_config
-  if [[ -n "$token" ]]; then
-    save_token "$token"
-  fi
   apply_config
   status
 }
@@ -761,8 +866,8 @@ main() {
     bootstrap) bootstrap "$@" ;;
     token)
       case "${1:-}" in
-        set) shift; save_token "${1:-}" ;;
-        check) [[ -s "$CF_ENV_FILE" ]] && echo "token 文件存在：$CF_ENV_FILE" || die "token 文件不存在：$CF_ENV_FILE" ;;
+        set) shift; save_token "${1:-}" "${2:-}" ;;
+        check) shift; check_token "${1:-}" ;;
         *) usage; exit 1 ;;
       esac
       ;;

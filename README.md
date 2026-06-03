@@ -11,7 +11,7 @@
 
 - 安装并启用 Caddy
 - 安装 Cloudflare DNS 插件，用于泛域名证书
-- 在目标机器本地保存 Cloudflare token
+- 在目标机器本地按域名保存 Cloudflare token
 - 管理泛域名反向代理规则
 - 管理固定域名反向代理规则
 - 生成、校验、备份并重载 `/etc/caddy/Caddyfile`
@@ -46,7 +46,7 @@ sudo ca
 
 ```bash
 sudo ca bootstrap
-sudo ca token set
+sudo ca token set DOMAIN
 sudo ca add-wildcard DOMAIN UPSTREAM
 sudo ca add-fixed DOMAIN UPSTREAM
 sudo ca apply
