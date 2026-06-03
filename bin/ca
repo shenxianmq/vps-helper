@@ -9,7 +9,7 @@ CADDYFILE="/etc/caddy/Caddyfile"
 CF_ENV_FILE="/etc/caddy/secrets/cloudflare.env"
 SYSTEMD_DROPIN_DIR="/etc/systemd/system/caddy.service.d"
 SYSTEMD_DROPIN="$SYSTEMD_DROPIN_DIR/10-cloudflare-env.conf"
-CA_UPDATE_URL="${CA_UPDATE_URL:-https://raw.githubusercontent.com/shenxianmq/vps-helper/main/bin/ca}"
+CA_UPDATE_URL="${CA_UPDATE_URL:-https://api.github.com/repos/shenxianmq/vps-helper/contents/bin/ca?ref=main}"
 
 die() {
   echo "错误：$*" >&2
@@ -391,18 +391,12 @@ update_ca() {
   need_root
   command -v curl >/dev/null 2>&1 || die "需要先安装 curl"
 
-  local self tmp backup current_hash new_hash update_url
+  local self tmp backup current_hash new_hash
   self="$(readlink -f "${BASH_SOURCE[0]}")"
   tmp="$(mktemp)"
-  update_url="$CA_UPDATE_URL"
-  if [[ "$update_url" == *\?* ]]; then
-    update_url="${update_url}&_ca_update=$(date +%s)"
-  else
-    update_url="${update_url}?_ca_update=$(date +%s)"
-  fi
 
   log "正在下载最新版 ca"
-  curl -fsSL "$update_url" -o "$tmp"
+  curl -fsSL -H "Accept: application/vnd.github.raw" "$CA_UPDATE_URL" -o "$tmp"
   bash -n "$tmp"
 
   local token_pattern private_begin_pattern private_key_pattern
