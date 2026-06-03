@@ -653,54 +653,98 @@ ca_version_info() {
   fi
 }
 
-update_ca() {
-  need_root
-  command -v curl >/dev/null 2>&1 || die "需要先安装 curl"
-
-  local self tmp backup current_hash new_hash
-  self="$(readlink -f "${BASH_SOURCE[0]}")"
-  tmp="$(mktemp)"
-
-  log "正在下载最新版 ca"
-  curl -fsSL -H "Accept: application/vnd.github.raw" "$CA_UPDATE_URL" -o "$tmp"
-  bash -n "$tmp"
+validate_ca_update_file() {
+  local file="$1"
+  bash -n "$file"
 
   local token_pattern private_begin_pattern private_key_pattern
   token_pattern='CLOUDFLARE_API_TOKEN=[A-Za-z0-9_./:+-]{20,}'
   private_begin_pattern='BEGIN ''(RSA |EC |OPENSSH |PRIVATE)'
   private_key_pattern='PRIVATE KEY''-----'
   for pattern in "$token_pattern" "$private_begin_pattern" "$private_key_pattern"; do
-    if grep -nE "$pattern" "$tmp" >/dev/null; then
-      rm -f "$tmp"
+    if grep -nE "$pattern" "$file" >/dev/null; then
       die "下载内容命中敏感关键字，已取消更新"
     fi
   done
+}
+
+prepare_ca_update() {
+  command -v curl >/dev/null 2>&1 || die "需要先安装 curl"
+
+  local self tmp current_hash new_hash
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  tmp="$(mktemp)"
+
+  log "正在下载最新版 ca"
+  curl -fsSL -H "Accept: application/vnd.github.raw" "$CA_UPDATE_URL" -o "$tmp"
+  validate_ca_update_file "$tmp"
 
   current_hash="$(sha256sum "$self" | awk '{print $1}')"
   new_hash="$(sha256sum "$tmp" | awk '{print $1}')"
 
+  CA_UPDATE_SELF="$self"
+  CA_UPDATE_TMP="$tmp"
+  CA_UPDATE_CURRENT_HASH="$current_hash"
+  CA_UPDATE_NEW_HASH="$new_hash"
+
   echo "当前 SHA256：$current_hash"
   echo "远端 SHA256：$new_hash"
   if [[ "$current_hash" == "$new_hash" ]]; then
-    rm -f "$tmp"
-    echo "已经是最新版。"
+    echo "状态：已经是最新版。"
+    return 1
+  fi
+
+  echo "状态：远端版本与当前不同，可以更新到远端版本。"
+  return 0
+}
+
+cleanup_prepared_ca_update() {
+  [[ -n "${CA_UPDATE_TMP:-}" ]] && rm -f "$CA_UPDATE_TMP"
+  CA_UPDATE_TMP=""
+}
+
+install_prepared_ca_update() {
+  local backup
+  [[ -n "${CA_UPDATE_SELF:-}" && -n "${CA_UPDATE_TMP:-}" ]] || die "没有可安装的 ca 更新包"
+
+  backup="$CA_UPDATE_SELF.before-update.$(date +%Y%m%d%H%M%S)"
+  cp "$CA_UPDATE_SELF" "$backup"
+  install -m 0755 "$CA_UPDATE_TMP" "$CA_UPDATE_SELF"
+  cleanup_prepared_ca_update
+  echo "已更新 ca。"
+  echo "旧版本备份：$backup"
+}
+
+update_ca() {
+  need_root
+  if ! prepare_ca_update; then
+    cleanup_prepared_ca_update
     return 0
   fi
 
-  backup="$self.before-update.$(date +%Y%m%d%H%M%S)"
-  cp "$self" "$backup"
-  install -m 0755 "$tmp" "$self"
-  rm -f "$tmp"
-  echo "已更新 ca。"
-  echo "旧版本备份：$backup"
+  install_prepared_ca_update
 }
 
 interactive_update_ca() {
   need_root
   ca_version_info
   echo
-  if confirm "现在检查并更新 ca 吗？"; then
-    update_ca
+  if ! confirm "现在检查远端版本吗？"; then
+    return 0
+  fi
+
+  echo
+  if ! prepare_ca_update; then
+    cleanup_prepared_ca_update
+    return 0
+  fi
+
+  echo
+  if confirm "确认安装这个新版本吗？"; then
+    install_prepared_ca_update
+  else
+    cleanup_prepared_ca_update
+    echo "已取消更新。"
   fi
 }
 
