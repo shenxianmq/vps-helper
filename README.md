@@ -11,6 +11,7 @@
 
 - 安装并启用 Caddy
 - 安装 Cloudflare DNS 插件，用于泛域名证书
+- 优先按 amd64/arm64 从 GitHub Release 下载已内置 Cloudflare 插件的 Caddy
 - 在目标机器本地按域名保存 Cloudflare token
 - 管理泛域名反向代理规则
 - 管理固定域名反向代理规则

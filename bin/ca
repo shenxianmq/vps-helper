@@ -11,6 +11,8 @@ CF_SECRETS_DIR="$(dirname "$CF_ENV_FILE")"
 SYSTEMD_DROPIN_DIR="/etc/systemd/system/caddy.service.d"
 SYSTEMD_DROPIN="$SYSTEMD_DROPIN_DIR/10-cloudflare-env.conf"
 CA_UPDATE_URL="${CA_UPDATE_URL:-https://api.github.com/repos/shenxianmq/vps-helper/contents/bin/ca?ref=main}"
+CADDY_RELEASE_TAG="${CADDY_RELEASE_TAG:-v0.1.0-caddy-2.11.3}"
+CADDY_RELEASE_BASE="${CADDY_RELEASE_BASE:-https://github.com/shenxianmq/vps-helper/releases/download/$CADDY_RELEASE_TAG}"
 
 die() {
   echo "错误：$*" >&2
@@ -101,8 +103,80 @@ validate_upstream() {
   [[ "$upstream" =~ ^https?://[^[:space:]]+$ || "$upstream" =~ ^[A-Za-z0-9._:-]+$ ]] || die "上游地址不合法：$upstream"
 }
 
+caddy_has_cloudflare() {
+  command -v caddy >/dev/null 2>&1 && caddy list-modules 2>/dev/null | grep -qx 'dns.providers.cloudflare'
+}
+
+detect_linux_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+install_caddy_from_release() {
+  need_root
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v tar >/dev/null 2>&1 || return 1
+  command -v sha256sum >/dev/null 2>&1 || return 1
+
+  local arch asset tmp archive sums expected actual backup
+  arch="$(detect_linux_arch)" || return 1
+  asset="caddy-linux-$arch.tar.gz"
+  tmp="$(mktemp -d)"
+  archive="$tmp/$asset"
+  sums="$tmp/SHA256SUMS"
+
+  log "尝试从 GitHub Release 下载 Caddy ($arch)"
+  curl -fL "$CADDY_RELEASE_BASE/$asset" -o "$archive" || return 1
+  curl -fL "$CADDY_RELEASE_BASE/SHA256SUMS" -o "$sums" || return 1
+
+  expected="$(awk -v f="$asset" '$2 == "dist/" f {print $1}' "$sums")"
+  [[ -n "$expected" ]] || return 1
+  actual="$(sha256sum "$archive" | awk '{print $1}')"
+  [[ "$expected" == "$actual" ]] || die "Caddy 下载包校验失败"
+
+  tar -xzf "$archive" -C "$tmp"
+  chmod 0755 "$tmp/caddy-linux-$arch"
+  "$tmp/caddy-linux-$arch" list-modules | grep -qx 'dns.providers.cloudflare' || return 1
+
+  if [[ -f /usr/bin/caddy ]]; then
+    backup="/usr/bin/caddy.before-ca-release.$(date +%Y%m%d%H%M%S)"
+    cp /usr/bin/caddy "$backup"
+    log "已备份旧 Caddy：$backup"
+  fi
+  install -m 0755 "$tmp/caddy-linux-$arch" /usr/bin/caddy
+  rm -rf "$tmp"
+  log "已安装 Release 版 Caddy：/usr/bin/caddy"
+}
+
 install_caddy() {
   need_root
+  if caddy_has_cloudflare; then
+    log "Caddy 已安装且包含 Cloudflare DNS 插件"
+  else
+    if install_caddy_from_release; then
+      log "Caddy Release 二进制安装完成"
+    else
+      install_caddy_from_apt
+    fi
+  fi
+
+  mkdir -p "$CF_SECRETS_DIR" "$SYSTEMD_DROPIN_DIR"
+  chown root:caddy "$CF_SECRETS_DIR" 2>/dev/null || chown root:root "$CF_SECRETS_DIR"
+  chmod 0750 "$CF_SECRETS_DIR"
+
+  cat >"$SYSTEMD_DROPIN" <<EOF
+[Service]
+EnvironmentFile=$CF_ENV_FILE
+EOF
+  systemctl daemon-reload
+  systemctl enable caddy
+  log "安装完成"
+}
+
+install_caddy_from_apt() {
   log "正在安装 Caddy 官方源和软件包"
   apt-get update
   apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
@@ -126,18 +200,6 @@ install_caddy() {
   else
     log "Cloudflare DNS 插件已存在"
   fi
-
-  mkdir -p "$CF_SECRETS_DIR" "$SYSTEMD_DROPIN_DIR"
-  chown root:caddy "$CF_SECRETS_DIR" 2>/dev/null || chown root:root "$CF_SECRETS_DIR"
-  chmod 0750 "$CF_SECRETS_DIR"
-
-  cat >"$SYSTEMD_DROPIN" <<EOF
-[Service]
-EnvironmentFile=$CF_ENV_FILE
-EOF
-  systemctl daemon-reload
-  systemctl enable caddy
-  log "安装完成"
 }
 
 save_token() {
